@@ -1,0 +1,32 @@
+# Build outputs
+**/x64/
+**/ARM64/
+**/Win32/
+**/Debug/
+**/Release/
+*.user
+*.aps
+*.log
+.vs/
+out/
+build/
+
+# Signing material - never commit keys or certificates
+*.pfx
+*.cer
+*.pvk
+*.cat
+!driver/**/CableAudio.cat
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Build output
+handoff/
+driver/**/out/
+*.sys
+*.obj
+
+# Signing material and generated test certs
+tools/signing/
