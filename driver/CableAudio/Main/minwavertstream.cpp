@@ -1269,6 +1269,23 @@ NTSTATUS CMiniportWaveRTStream::SetState
 
             }
 
+            //
+            // Render streams are opened without notifications on this stack, so
+            // the engine never calls SetWritePacket and no timer is armed. Arm
+            // the emulation timer ourselves: the callback then advances the play
+            // position and feeds the loopback ring.
+            //
+            if (!m_bCapture && m_ulNotificationIntervalMs == 0)
+            {
+                ExSetTimer
+                (
+                    m_pNotificationTimer,
+                    (-1) * HNSTIME_PER_MILLISECOND,
+                    HNSTIME_PER_MILLISECOND,
+                    NULL
+                );
+            }
+
             break;
     }
 
@@ -1365,6 +1382,7 @@ VOID CMiniportWaveRTStream::UpdatePosition
             m_bLastBufferRendered = TRUE;
         }
 
+
         // Feed rendered audio to the microphone endpoint.
         LoopbackRender(ByteDisplacement);
 
@@ -1412,7 +1430,8 @@ ByteDisplacement - # of bytes to process.
 {
     ULONG   bufferOffset = m_ullLinearPosition % m_ulDmaBufferSize;
     ULONG   loopbackBytesPerSample = 0;
-    BOOLEAN loopbackSupported = LoopbackIsFormatSupported(m_pWfExt, &loopbackBytesPerSample);
+    BOOLEAN loopbackIsFloat = FALSE;
+    BOOLEAN loopbackSupported = LoopbackIsFormatSupported(m_pWfExt, &loopbackBytesPerSample, &loopbackIsFloat);
 
     // Normally this will loop no more than once for a single wrap, but if
     // many bytes have been displaced then this may loops many times.
@@ -1421,16 +1440,15 @@ ByteDisplacement - # of bytes to process.
         ULONG runWrite = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
         
         // Fill the capture buffer with audio looped back from the speaker.
-        // Unsupported formats (anything other than 48 kHz stereo PCM) get silence.
         if (loopbackSupported)
         {
-            LoopbackRead(m_pMiniport->CableIndex(), m_pDmaBuffer + bufferOffset, runWrite, loopbackBytesPerSample);
+            LoopbackRead(m_pMiniport->CableIndex(), m_pDmaBuffer + bufferOffset, runWrite, loopbackBytesPerSample, loopbackIsFloat);
         }
         else
         {
             RtlZeroMemory(m_pDmaBuffer + bufferOffset, runWrite);
         }
-           	
+            	
         bufferOffset = (bufferOffset + runWrite) % m_ulDmaBufferSize;
         ByteDisplacement -= runWrite;
     }
@@ -1456,13 +1474,14 @@ ByteDisplacement - # of bytes to process.
 --*/
 {
     ULONG bytesPerSample = 0;
+    BOOLEAN isFloat = FALSE;
 
     if (m_pDmaBuffer == NULL || m_ulDmaBufferSize == 0)
     {
         return;
     }
 
-    if (!LoopbackIsFormatSupported(m_pWfExt, &bytesPerSample))
+    if (!LoopbackIsFormatSupported(m_pWfExt, &bytesPerSample, &isFloat))
     {
         return;
     }
@@ -1472,7 +1491,9 @@ ByteDisplacement - # of bytes to process.
     while (ByteDisplacement > 0)
     {
         ULONG runRead = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
-        LoopbackWrite(m_pMiniport->CableIndex(), m_pDmaBuffer + bufferOffset, runRead, bytesPerSample);
+
+        LoopbackWrite(m_pMiniport->CableIndex(), m_pDmaBuffer + bufferOffset, runRead, bytesPerSample, isFloat);
+
         bufferOffset = (bufferOffset + runRead) % m_ulDmaBufferSize;
         ByteDisplacement -= runRead;
     }

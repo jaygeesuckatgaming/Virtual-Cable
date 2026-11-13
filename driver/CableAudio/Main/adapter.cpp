@@ -693,7 +693,7 @@ Routine Description:
     }
 
     if (NT_SUCCESS(IoOpenDeviceRegistryKey(PhysicalDeviceObject,
-                                           PLUGPLAY_REGKEY_DEVICE,
+                                           PLUGPLAY_REGKEY_DRIVER,
                                            KEY_READ,
                                            &key)))
     {

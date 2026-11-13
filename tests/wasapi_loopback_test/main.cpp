@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <objbase.h>
 
 #include <algorithm>
@@ -132,6 +133,32 @@ void ListEndpoints(IMMDeviceEnumerator* enumerator) {
     }
 }
 
+// Reports (and optionally fixes) the endpoint volume. In shared mode the
+// engine applies the endpoint volume before writing into the driver buffer,
+// so a muted or zero-volume endpoint makes the driver receive pure silence.
+void ReportEndpointVolume(IMMDevice* device, const wchar_t* label, bool apply) {
+    IAudioEndpointVolume* volume = nullptr;
+    if (FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void**>(&volume)))) {
+        wprintf(L"%s volume: unavailable\n", label);
+        return;
+    }
+
+    BOOL mute = FALSE;
+    float scalar = -1.0f;
+    volume->GetMute(&mute);
+    volume->GetMasterVolumeLevelScalar(&scalar);
+    wprintf(L"%s volume: %.3f mute=%d\n", label, scalar, mute ? 1 : 0);
+
+    if (apply) {
+        volume->SetMute(FALSE, nullptr);
+        volume->SetMasterVolumeLevelScalar(1.0f, nullptr);
+        wprintf(L"%s volume set to 1.000, unmuted\n", label);
+    }
+
+    volume->Release();
+}
+
 struct AudioStream {
     IAudioClient* client = nullptr;
     WAVEFORMATEX* format = nullptr;
@@ -181,6 +208,7 @@ int wmain(int argc, wchar_t** argv) {
     double seconds = 10.0;
     double frequency = 1000.0;
     bool list = false;
+    bool fixVolume = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = Narrow(argv[i]);
@@ -189,6 +217,8 @@ int wmain(int argc, wchar_t** argv) {
         };
         if (arg == "--list") {
             list = true;
+        } else if (arg == "--fix-volume") {
+            fixVolume = true;
         } else if (arg == "--render") {
             next(&renderNeedle);
         } else if (arg == "--capture") {
@@ -242,6 +272,10 @@ int wmain(int argc, wchar_t** argv) {
 
     AudioStream render;
     AudioStream capture;
+
+    ReportEndpointVolume(renderDevice, L"render", fixVolume);
+    ReportEndpointVolume(captureDevice, L"capture", fixVolume);
+
     if (!OpenShared(renderDevice, true, &render)) {
         wprintf(L"Could not open the render endpoint.\n");
         return 1;
@@ -326,6 +360,8 @@ int wmain(int argc, wchar_t** argv) {
                     LeaveCriticalSection(&pendingLock);
                 }
             }
+            std::memcpy(buffer, samples.data(),
+                        static_cast<size_t>(write) * 2 * sizeof(float));
             renderClient->ReleaseBuffer(write, 0);
             frame += write;
             framesWritten.store(frame);

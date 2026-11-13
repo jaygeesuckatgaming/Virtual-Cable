@@ -1,7 +1,19 @@
 import io
+import datetime
 
 CABLES = 4
 P = 'driver/CableAudio/Main/VirtualAudioDriver.inx'
+
+#
+# Bump the driver version on every generation. Windows treats an identical
+# DriverVer as "same package", which makes devcon update / pnputil /install
+# a silent no-op and leaves the old .sys in the driver store.
+#
+_now = datetime.datetime.now()
+_minutes = _now.hour * 60 + _now.minute
+DRIVER_VER = '{:02d}/{:02d}/{},1.{}.{:02d}{:02d}.{:04d}'.format(
+    _now.month, _now.day, _now.year,
+    _now.year % 100, _now.month, _now.day, _minutes)
 
 out = []
 w = out.append
@@ -11,7 +23,7 @@ w('Signature   = "$Windows NT$"')
 w('Class       = MEDIA')
 w('Provider    = %ProviderName%')
 w('ClassGUID   = {4d36e96c-e325-11ce-bfc1-08002be10318}')
-w('DriverVer   = 11/13/2026, 1.2.0.0')
+w(f'DriverVer   = {DRIVER_VER}')
 w('CatalogFile = VirtualAudioDriver.cat')
 w('PnpLockDown = 1')
 w('')

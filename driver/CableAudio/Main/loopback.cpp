@@ -31,14 +31,101 @@ typedef struct _LOOPBACK_CABLE
 static LOOPBACK_CABLE g_Loopback[LOOPBACK_CABLES];
 
 //=============================================================================
-// Sample conversion helpers. Stream samples are little-endian, signed and
-// left-justified in their container. The ring stores 32-bit samples.
+// Sample conversion helpers. Stream samples are little-endian. Integer PCM is
+// converted to and from Q31 (the ring format); 32-bit IEEE float is converted
+// with integer bit arithmetic so the audio path never touches the FPU.
 //=============================================================================
+static __forceinline LONG
+LoopbackFloatBitsToQ31
+(
+    _In_ ULONG Bits
+)
+{
+    ULONG   exponent = (Bits >> 23) & 0xFF;
+    ULONG   mantissa = (Bits & 0x7FFFFF) | 0x800000;
+    LONG    shift    = (LONG)exponent - 119;   // 127 (bias) + 23 (mantissa) - 31 (Q31)
+    ULONGLONG value;
+
+    if (exponent == 0 || exponent == 0xFF)
+    {
+        // Zero, denormal or infinity/NaN.
+        return 0;
+    }
+
+    if (shift >= 0)
+    {
+        value = (ULONGLONG)mantissa << shift;
+
+        if (value > 0x7FFFFFFF)
+        {
+            value = 0x7FFFFFFF;
+        }
+    }
+    else
+    {
+        value = (ULONGLONG)mantissa >> (-shift);
+    }
+
+    return (Bits & 0x80000000) ? -(LONG)value : (LONG)value;
+}
+
+static __forceinline ULONG
+LoopbackQ31ToFloatBits
+(
+    _In_ LONG Value
+)
+{
+    ULONG   sign = 0;
+    ULONG   magnitude;
+    ULONG   mantissa;
+    LONG    msb;
+    ULONG   exponent;
+    ULONG   bits;
+
+    if (Value < 0)
+    {
+        sign = 0x80000000;
+        magnitude = (ULONG)(-(LONGLONG)Value);
+    }
+    else
+    {
+        magnitude = (ULONG)Value;
+    }
+
+    if (magnitude == 0)
+    {
+        return sign;
+    }
+
+    // Position of the most significant set bit (0..31).
+    msb = 31;
+    while ((magnitude & (1UL << msb)) == 0)
+    {
+        msb--;
+    }
+
+    if (msb >= 23)
+    {
+        mantissa = magnitude >> (msb - 23);
+    }
+    else
+    {
+        mantissa = magnitude << (23 - msb);
+    }
+
+    exponent = (ULONG)(msb + 96);   // msb - 31 + 127
+
+    bits = sign | (exponent << 23) | (mantissa & 0x7FFFFF);
+
+    return bits;
+}
+
 static __forceinline LONG
 LoopbackDecodeSample
 (
     _In_reads_bytes_(BytesPerSample) const BYTE* Sample,
-    _In_ ULONG                                   BytesPerSample
+    _In_ ULONG                                   BytesPerSample,
+    _In_ BOOLEAN                                 IsFloat
 )
 {
     ULONG value = 0;
@@ -59,6 +146,11 @@ LoopbackDecodeSample
         break;
     }
 
+    if (IsFloat)
+    {
+        return LoopbackFloatBitsToQ31(value);
+    }
+
     return (LONG)value;
 }
 
@@ -67,10 +159,11 @@ LoopbackEncodeSample
 (
     _In_ LONG                                     Value,
     _Out_writes_bytes_(BytesPerSample) BYTE*      Sample,
-    _In_ ULONG                                    BytesPerSample
+    _In_ ULONG                                    BytesPerSample,
+    _In_ BOOLEAN                                  IsFloat
 )
 {
-    ULONG value = (ULONG)Value;
+    ULONG value = IsFloat ? LoopbackQ31ToFloatBits(Value) : (ULONG)Value;
 
     switch (BytesPerSample)
     {
@@ -99,10 +192,12 @@ BOOLEAN
 LoopbackIsFormatSupported
 (
     _In_opt_ PWAVEFORMATEXTENSIBLE  WaveFormat,
-    _Out_    ULONG*                 BytesPerSample
+    _Out_    ULONG*                 BytesPerSample,
+    _Out_    BOOLEAN*               IsFloat
 )
 {
     *BytesPerSample = 0;
+    *IsFloat        = FALSE;
 
     if (WaveFormat == NULL)
     {
@@ -117,12 +212,22 @@ LoopbackIsFormatSupported
         return FALSE;
     }
 
+    BOOLEAN isFloat = FALSE;
+
     if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
     {
-        if (!IsEqualGUIDAligned(WaveFormat->SubFormat, KSDATAFORMAT_SUBTYPE_PCM))
+        if (IsEqualGUIDAligned(WaveFormat->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT))
+        {
+            isFloat = TRUE;
+        }
+        else if (!IsEqualGUIDAligned(WaveFormat->SubFormat, KSDATAFORMAT_SUBTYPE_PCM))
         {
             return FALSE;
         }
+    }
+    else if (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
+    {
+        isFloat = TRUE;
     }
     else if (format->wFormatTag != WAVE_FORMAT_PCM)
     {
@@ -131,13 +236,25 @@ LoopbackIsFormatSupported
 
     ULONG bytesPerSample = format->nBlockAlign / format->nChannels;
 
-    if (bytesPerSample < 2 || bytesPerSample > 4 ||
-        format->nBlockAlign != bytesPerSample * format->nChannels)
+    if (format->nBlockAlign != bytesPerSample * format->nChannels)
+    {
+        return FALSE;
+    }
+
+    if (isFloat)
+    {
+        if (bytesPerSample != 4)
+        {
+            return FALSE;
+        }
+    }
+    else if (bytesPerSample < 2 || bytesPerSample > 4)
     {
         return FALSE;
     }
 
     *BytesPerSample = bytesPerSample;
+    *IsFloat        = isFloat;
     return TRUE;
 }
 
@@ -148,7 +265,8 @@ LoopbackWrite
     _In_ ULONG                              CableIndex,
     _In_reads_bytes_(ByteCount) const BYTE* Source,
     _In_ ULONG                              ByteCount,
-    _In_ ULONG                              BytesPerSample
+    _In_ ULONG                              BytesPerSample,
+    _In_ BOOLEAN                            IsFloat
 )
 {
     ULONG frameBytes = BytesPerSample * LOOPBACK_CHANNELS;
@@ -170,7 +288,7 @@ LoopbackWrite
 
         for (ULONG channel = 0; channel < LOOPBACK_CHANNELS; channel++)
         {
-            destination[channel] = LoopbackDecodeSample(Source, BytesPerSample);
+            destination[channel] = LoopbackDecodeSample(Source, BytesPerSample, IsFloat);
             Source += BytesPerSample;
         }
 
@@ -186,26 +304,27 @@ LoopbackWrite
 }
 
 //=============================================================================
-VOID
+ULONG
 LoopbackRead
 (
     _In_ ULONG                          CableIndex,
     _Out_writes_bytes_(ByteCount) BYTE* Destination,
     _In_ ULONG                          ByteCount,
-    _In_ ULONG                          BytesPerSample
+    _In_ ULONG                          BytesPerSample,
+    _In_ BOOLEAN                        IsFloat
 )
 {
     ULONG frameBytes = BytesPerSample * LOOPBACK_CHANNELS;
 
     if (Destination == NULL)
     {
-        return;
+        return 0;
     }
 
     if (CableIndex >= LOOPBACK_CABLES || frameBytes == 0)
     {
         RtlZeroMemory(Destination, ByteCount);
-        return;
+        return 0;
     }
 
     LOOPBACK_CABLE* cable = &g_Loopback[CableIndex];
@@ -236,7 +355,7 @@ LoopbackRead
 
         for (ULONG channel = 0; channel < LOOPBACK_CHANNELS; channel++)
         {
-            LoopbackEncodeSample(source[channel], Destination, BytesPerSample);
+            LoopbackEncodeSample(source[channel], Destination, BytesPerSample, IsFloat);
             Destination += BytesPerSample;
         }
 
@@ -256,4 +375,45 @@ LoopbackRead
     {
         RtlZeroMemory(Destination, silenceBytes);
     }
+
+    return copyFrames;
+}
+
+//=============================================================================
+// DEBUG ONLY
+//
+VOID
+LoopbackDebugFill
+(
+    _In_ ULONG CableIndex,
+    _In_ ULONG Frames,
+    _In_ LONG  Value
+)
+{
+    if (CableIndex >= LOOPBACK_CABLES)
+    {
+        return;
+    }
+
+    LOOPBACK_CABLE* cable = &g_Loopback[CableIndex];
+    KIRQL oldIrql;
+
+    KeAcquireSpinLock(&cable->Lock, &oldIrql);
+
+    for (ULONG i = 0; i < Frames; i++)
+    {
+        LONG* destination = &cable->Ring[cable->WriteFrame * LOOPBACK_CHANNELS];
+
+        destination[0] = Value;
+        destination[1] = Value;
+
+        cable->WriteFrame = (cable->WriteFrame + 1) % LOOPBACK_RING_FRAMES;
+
+        if (cable->FramesQueued < LOOPBACK_RING_FRAMES)
+        {
+            cable->FramesQueued++;
+        }
+    }
+
+    KeReleaseSpinLock(&cable->Lock, oldIrql);
 }

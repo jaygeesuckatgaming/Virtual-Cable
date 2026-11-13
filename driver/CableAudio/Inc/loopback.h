@@ -12,10 +12,12 @@ Abstract:
     to that cable's speaker endpoint is copied into its ring and played back out
     of the matching microphone endpoint, so the pair behaves as an audio cable.
 
-    The ring holds 48 kHz, 2-channel, 32-bit signed PCM (left-justified, as in
-    WAVEFORMATEXTENSIBLE). Each endpoint converts between its own stream format
-    and the ring format. Only 48 kHz stereo integer PCM is looped; any other
-    stream format produces silence on the microphone side.
+    The ring holds 48 kHz, 2-channel, 32-bit signed fixed point (Q31) samples.
+    Each endpoint converts between its own stream format and the ring format.
+    Integer PCM (16/24/32-bit containers) and 32-bit IEEE float are looped;
+    anything else produces silence on the microphone side. Conversions are
+    integer-only on purpose so no floating-point state has to be saved in the
+    audio path.
 
     Ring storage and locks are static and zero-initialised, which is a valid
     initial state for KSPIN_LOCK. All functions are callable at
@@ -39,13 +41,15 @@ Abstract:
 
 //
 // Returns TRUE if the stream format can be looped and sets *BytesPerSample
-// to the container size of one sample (2, 3 or 4 bytes).
+// to the container size of one sample (2, 3 or 4 bytes) and *IsFloat when
+// the samples are 32-bit IEEE float rather than integer PCM.
 //
 BOOLEAN
 LoopbackIsFormatSupported
 (
     _In_opt_ PWAVEFORMATEXTENSIBLE  WaveFormat,
-    _Out_    ULONG*                 BytesPerSample
+    _Out_    ULONG*                 BytesPerSample,
+    _Out_    BOOLEAN*               IsFloat
 );
 
 //
@@ -57,20 +61,34 @@ LoopbackWrite
     _In_ ULONG                              CableIndex,
     _In_reads_bytes_(ByteCount) const BYTE* Source,
     _In_ ULONG                              ByteCount,
-    _In_ ULONG                              BytesPerSample
+    _In_ ULONG                              BytesPerSample,
+    _In_ BOOLEAN                            IsFloat
 );
 
 //
 // Microphone side: fill the capture buffer from the cable's ring buffer.
-// Any shortfall is filled with silence.
+// Any shortfall is filled with silence. Returns the number of frames copied
+// (0 when the ring was empty).
 //
-VOID
+ULONG
 LoopbackRead
 (
     _In_ ULONG                          CableIndex,
     _Out_writes_bytes_(ByteCount) BYTE* Destination,
     _In_ ULONG                          ByteCount,
-    _In_ ULONG                          BytesPerSample
+    _In_ ULONG                          BytesPerSample,
+    _In_ BOOLEAN                        IsFloat
+);
+
+//
+// DEBUG ONLY
+//
+VOID
+LoopbackDebugFill
+(
+    _In_ ULONG CableIndex,
+    _In_ ULONG Frames,
+    _In_ LONG  Value
 );
 
 #endif // _VIRTUALAUDIODRIVER_LOOPBACK_H_

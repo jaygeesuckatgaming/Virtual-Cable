@@ -43,6 +43,12 @@ $sysName = $SysName
 $infName = $InfName
 $catName = $CatName
 
+# Regenerate the INX first. Its DriverVer is time-based; without this, a
+# rebuilt .sys lands in a package with an unchanged version and Windows
+# reports "up-to-date" instead of installing the new driver.
+& python (Join-Path $root "make_inf.py")
+if ($LASTEXITCODE -ne 0) { throw "make_inf.py failed ($LASTEXITCODE)." }
+
 # INX -> INF. StampInf is avoided here: only two tokens are involved and the
 # architecture token must become "amd64" (not "x64").
 $text = Get-Content $Inx -Raw
