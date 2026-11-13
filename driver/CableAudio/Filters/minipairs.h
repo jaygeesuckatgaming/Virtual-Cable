@@ -22,6 +22,8 @@ Abstract:
 #include "micarray1toptable.h"
 #include "micarraywavtable.h"
 
+#include <devpkey.h>
+
 
 NTSTATUS
 CreateMiniportWaveRTVirtualAudioDriver
@@ -71,7 +73,33 @@ PHYSICALCONNECTIONTABLE SpeakerTopologyPhysicalConnections[] =
     }
 };
 
-#define DEFINE_RENDER_CABLE(var, topo, wave, index)                       \
+//
+// Per-cable endpoint names. The driver sets these on the KS interfaces when it
+// starts, which is what Windows uses to name the audio endpoints. Doing it here
+// avoids depending on the INF's interface AddReg being applied.
+//
+static const WCHAR Cable1Name[] = L"Virtual Cable 01";
+static const WCHAR Cable2Name[] = L"Virtual Cable 02";
+static const WCHAR Cable3Name[] = L"Virtual Cable 03";
+static const WCHAR Cable4Name[] = L"Virtual Cable 04";
+
+#define CABLE_NAME_PROPERTIES(name)                                        \
+static const VIRTUALAUDIODRIVER_DEVPROPERTY name##Properties[] =           \
+{                                                                          \
+    {                                                                      \
+        &DEVPKEY_DeviceInterface_FriendlyName,                             \
+        DEVPROP_TYPE_STRING,                                               \
+        sizeof(name),                                                      \
+        (PVOID)name                                                        \
+    }                                                                      \
+};
+
+CABLE_NAME_PROPERTIES(Cable1Name)
+CABLE_NAME_PROPERTIES(Cable2Name)
+CABLE_NAME_PROPERTIES(Cable3Name)
+CABLE_NAME_PROPERTIES(Cable4Name)
+
+#define DEFINE_RENDER_CABLE(var, topo, wave, index, props)                \
 static ENDPOINT_MINIPAIR var =                                             \
 {                                                                          \
     eSpeakerDevice,                                                        \
@@ -79,13 +107,14 @@ static ENDPOINT_MINIPAIR var =                                             \
     NULL,                                                                  \
     CreateMiniportTopologyVirtualAudioDriver,                              \
     &SpeakerTopoMiniportFilterDescriptor,                                  \
-    0, NULL,                                                               \
+    SIZEOF_ARRAY(props),                                                   \
+    props,                                                                 \
     wave,                                                                  \
     NULL,                                                                  \
     CreateMiniportWaveRTVirtualAudioDriver,                                \
     &SpeakerWaveMiniportFilterDescriptor,                                  \
-    0,                                                                     \
-    NULL,                                                                  \
+    SIZEOF_ARRAY(props),                                                   \
+    props,                                                                 \
     SPEAKER_DEVICE_MAX_CHANNELS,                                           \
     SpeakerPinDeviceFormatsAndModes,                                       \
     SIZEOF_ARRAY(SpeakerPinDeviceFormatsAndModes),                         \
@@ -95,10 +124,10 @@ static ENDPOINT_MINIPAIR var =                                             \
     index                                                                  \
 };
 
-DEFINE_RENDER_CABLE(RenderCable1, L"TopologyCable1", L"WaveCable1", 0)
-DEFINE_RENDER_CABLE(RenderCable2, L"TopologyCable2", L"WaveCable2", 1)
-DEFINE_RENDER_CABLE(RenderCable3, L"TopologyCable3", L"WaveCable3", 2)
-DEFINE_RENDER_CABLE(RenderCable4, L"TopologyCable4", L"WaveCable4", 3)
+DEFINE_RENDER_CABLE(RenderCable1, L"TopologyCable1", L"WaveCable1", 0, Cable1NameProperties)
+DEFINE_RENDER_CABLE(RenderCable2, L"TopologyCable2", L"WaveCable2", 1, Cable2NameProperties)
+DEFINE_RENDER_CABLE(RenderCable3, L"TopologyCable3", L"WaveCable3", 2, Cable3NameProperties)
+DEFINE_RENDER_CABLE(RenderCable4, L"TopologyCable4", L"WaveCable4", 3, Cable4NameProperties)
 //
 // Capture miniports.
 //
@@ -123,7 +152,7 @@ PHYSICALCONNECTIONTABLE MicArray1TopologyPhysicalConnections[] =
     }
 };
 
-#define DEFINE_CAPTURE_CABLE(var, topo, wave, index)                      \
+#define DEFINE_CAPTURE_CABLE(var, topo, wave, index, props)               \
 static ENDPOINT_MINIPAIR var =                                             \
 {                                                                          \
     eMicArrayDevice1,                                                      \
@@ -131,13 +160,14 @@ static ENDPOINT_MINIPAIR var =                                             \
     NULL,                                                                  \
     CreateMicArrayMiniportTopology,                                        \
     &MicArray1TopoMiniportFilterDescriptor,                                \
-    0, NULL,                                                               \
+    SIZEOF_ARRAY(props),                                                   \
+    props,                                                                 \
     wave,                                                                  \
     NULL,                                                                  \
     CreateMiniportWaveRTVirtualAudioDriver,                                \
     &MicArrayWaveMiniportFilterDescriptor,                                 \
-    0,                                                                     \
-    NULL,                                                                  \
+    SIZEOF_ARRAY(props),                                                   \
+    props,                                                                 \
     MICARRAY_DEVICE_MAX_CHANNELS,                                          \
     MicArrayPinDeviceFormatsAndModes,                                      \
     SIZEOF_ARRAY(MicArrayPinDeviceFormatsAndModes),                        \
@@ -147,10 +177,10 @@ static ENDPOINT_MINIPAIR var =                                             \
     index                                                                  \
 };
 
-DEFINE_CAPTURE_CABLE(CaptureCable1, L"TopologyCableMic1", L"WaveCableMic1", 0)
-DEFINE_CAPTURE_CABLE(CaptureCable2, L"TopologyCableMic2", L"WaveCableMic2", 1)
-DEFINE_CAPTURE_CABLE(CaptureCable3, L"TopologyCableMic3", L"WaveCableMic3", 2)
-DEFINE_CAPTURE_CABLE(CaptureCable4, L"TopologyCableMic4", L"WaveCableMic4", 3)
+DEFINE_CAPTURE_CABLE(CaptureCable1, L"TopologyCableMic1", L"WaveCableMic1", 0, Cable1NameProperties)
+DEFINE_CAPTURE_CABLE(CaptureCable2, L"TopologyCableMic2", L"WaveCableMic2", 1, Cable2NameProperties)
+DEFINE_CAPTURE_CABLE(CaptureCable3, L"TopologyCableMic3", L"WaveCableMic3", 2, Cable3NameProperties)
+DEFINE_CAPTURE_CABLE(CaptureCable4, L"TopologyCableMic4", L"WaveCableMic4", 3, Cable4NameProperties)
 
 //=============================================================================
 //

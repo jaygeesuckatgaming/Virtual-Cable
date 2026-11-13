@@ -601,19 +601,18 @@ InstallAllRenderFilters(
     )
 {
     NTSTATUS            ntStatus;
-    PENDPOINT_MINIPAIR* ppAeMiniports   = g_RenderEndpoints;
-    
+    ULONG               index;
+
     PAGED_CODE();
 
-    for(ULONG i = 0; i < g_cRenderEndpoints; ++i, ++ppAeMiniports)
+    index = _pAdapterCommon->CableIndex();
+    if (index >= g_cRenderEndpoints)
     {
-        ntStatus = InstallEndpointRenderFilters(_pDeviceObject, _pIrp, _pAdapterCommon, *ppAeMiniports);
-        IF_FAILED_JUMP(ntStatus, Exit);
+        index = 0;
     }
-    
-    ntStatus = STATUS_SUCCESS;
 
-Exit:
+    ntStatus = InstallEndpointRenderFilters(_pDeviceObject, _pIrp, _pAdapterCommon, g_RenderEndpoints[index]);
+
     return ntStatus;
 }
 
@@ -652,20 +651,78 @@ InstallAllCaptureFilters(
 )
 {
     NTSTATUS            ntStatus;
-    PENDPOINT_MINIPAIR* ppAeMiniports = g_CaptureEndpoints;
+    ULONG               index;
 
     PAGED_CODE();
 
-    for (ULONG i = 0; i < g_cCaptureEndpoints; ++i, ++ppAeMiniports)
+    index = _pAdapterCommon->CableIndex();
+    if (index >= g_cCaptureEndpoints)
     {
-        ntStatus = InstallEndpointCaptureFilters(_pDeviceObject, _pIrp, _pAdapterCommon, *ppAeMiniports);
-        IF_FAILED_JUMP(ntStatus, Exit);
+        index = 0;
     }
 
-    ntStatus = STATUS_SUCCESS;
+    ntStatus = InstallEndpointCaptureFilters(_pDeviceObject, _pIrp, _pAdapterCommon, g_CaptureEndpoints[index]);
 
-Exit:
     return ntStatus;
+}
+
+#pragma code_seg("PAGE")
+ULONG
+GetCableIndexFromRegistry
+(
+    _In_ PDEVICE_OBJECT PhysicalDeviceObject
+)
+/*++
+
+Routine Description:
+
+    Each root device (ROOT\VirtualAudioCable 1..0004) carries a CableIndex
+    value written by the INF. Read it back so the adapter installs only that
+    cable's endpoint pair.
+
+--*/
+{
+    PAGED_CODE();
+
+    HANDLE key = NULL;
+    ULONG index = 0;
+
+    if (PhysicalDeviceObject == NULL)
+    {
+        return 0;
+    }
+
+    if (NT_SUCCESS(IoOpenDeviceRegistryKey(PhysicalDeviceObject,
+                                           PLUGPLAY_REGKEY_DEVICE,
+                                           KEY_READ,
+                                           &key)))
+    {
+        WCHAR buffer[64];
+        UNICODE_STRING valueName;
+        ULONG returned = 0;
+
+        RtlInitUnicodeString(&valueName, L"CableIndex");
+
+        if (NT_SUCCESS(ZwQueryValueKey(key,
+                                       &valueName,
+                                       KeyValuePartialInformation,
+                                       buffer,
+                                       sizeof(buffer),
+                                       &returned)))
+        {
+            PKEY_VALUE_PARTIAL_INFORMATION info =
+                (PKEY_VALUE_PARTIAL_INFORMATION)buffer;
+
+            if (info->Type == REG_DWORD && info->DataLength == sizeof(ULONG))
+            {
+                index = *(ULONG *)info->Data;
+            }
+        }
+
+        ZwClose(key);
+    }
+
+    return index;
 }
 
 //=============================================================================
@@ -733,6 +790,9 @@ Return Value:
 
     ntStatus = pAdapterCommon->Init(DeviceObject);
     IF_FAILED_JUMP(ntStatus, Exit);
+
+    pAdapterCommon->SetCableIndex(
+        GetCableIndexFromRegistry(pAdapterCommon->GetPhysicalDeviceObject()));
 
     //
     // register with PortCls for power-management services

@@ -266,6 +266,17 @@ DECLARE_INTERFACE_(IAdapterCommon, IUnknown)
         THIS
     ) PURE;
 
+    // Cable (0..LOOPBACK_CABLES-1) represented by this device instance.
+    STDMETHOD_(ULONG,           CableIndex)
+    (
+        THIS
+    ) PURE;
+
+    STDMETHOD_(VOID,            SetCableIndex)
+    (
+        _In_ ULONG              CableIndex
+    ) PURE;
+
     STDMETHOD_(WDFDEVICE,       GetWdfDevice)
     (
         THIS

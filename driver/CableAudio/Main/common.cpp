@@ -51,6 +51,9 @@ class CAdapterCommon :
 
         DWORD                   m_dwIdleRequests;
 
+        // Cable represented by this device instance (0..LOOPBACK_CABLES-1).
+        ULONG                   m_CableIndex;
+
     public:
         //=====================================================================
         // Default CUnknown
@@ -73,6 +76,9 @@ class CAdapterCommon :
         STDMETHODIMP_(PDEVICE_OBJECT)   GetDeviceObject(void);
         
         STDMETHODIMP_(PDEVICE_OBJECT)   GetPhysicalDeviceObject(void);
+
+        STDMETHODIMP_(ULONG)            CableIndex(void);
+        STDMETHODIMP_(void)             SetCableIndex(_In_ ULONG CableIndex);
         
         STDMETHODIMP_(WDFDEVICE)        GetWdfDevice(void);
 
@@ -376,15 +382,9 @@ Return Value:
     NTSTATUS ntStatus;
 
     //
-    // This sample supports only one instance of this object.
-    // (b/c of CSaveData's static members and Bluetooth HFP logic). 
+    // One adapter per root device; the cable driver creates four of them.
     //
-    if (InterlockedCompareExchange(&CAdapterCommon::m_AdapterInstances, 1, 0) != 0)
-    {
-        ntStatus = STATUS_DEVICE_BUSY;
-        DPF(D_ERROR, ("NewAdapterCommon failed, only one instance is allowed"));
-        goto Done;
-    }
+    InterlockedIncrement(&CAdapterCommon::m_AdapterInstances);
     
     //
     // Allocate an adapter object.
@@ -448,7 +448,6 @@ Return Value:
     }
 
     InterlockedDecrement(&CAdapterCommon::m_AdapterInstances);
-    ASSERT(CAdapterCommon::m_AdapterInstances == 0);
 } // ~CAdapterCommon  
 
 //=============================================================================
@@ -476,6 +475,30 @@ Return Value:
     
     return m_pDeviceObject;
 } // GetDeviceObject
+
+//=============================================================================
+#pragma code_seg("PAGE")
+STDMETHODIMP_(ULONG)
+CAdapterCommon::CableIndex
+(
+    void
+)
+{
+    PAGED_CODE();
+    return m_CableIndex;
+} // CableIndex
+
+//=============================================================================
+#pragma code_seg("PAGE")
+STDMETHODIMP_(void)
+CAdapterCommon::SetCableIndex
+(
+    _In_ ULONG CableIndex
+)
+{
+    PAGED_CODE();
+    m_CableIndex = CableIndex;
+} // SetCableIndex
 
 //=============================================================================
 #pragma code_seg("PAGE")
@@ -568,6 +591,7 @@ Return Value:
     m_PowerState            = PowerDeviceD0;
     m_pHW                   = NULL;
     m_pPortClsEtwHelper     = NULL;
+    m_CableIndex            = 0;
 
     InitializeListHead(&m_SubdeviceCache);
 
