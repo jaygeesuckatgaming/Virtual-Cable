@@ -173,6 +173,9 @@ public:
 
     ~CMiniportWaveRT();
 
+    // Cable pair this miniport belongs to (see ENDPOINT_MINIPAIR::CableIndex).
+    ULONG CableIndex() const { return m_pMiniportPair ? m_pMiniportPair->CableIndex : 0; }
+
     IMP_IMiniportWaveRT;
     IMP_IMiniportAudioSignalProcessing;
     

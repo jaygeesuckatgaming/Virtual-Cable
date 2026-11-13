@@ -71,29 +71,34 @@ PHYSICALCONNECTIONTABLE SpeakerTopologyPhysicalConnections[] =
     }
 };
 
-static
-ENDPOINT_MINIPAIR SpeakerMiniports =
-{
-    eSpeakerDevice,
-    L"TopologySpeaker",                                     // make sure this or the template name matches with KSNAME_TopologySpeaker in the inf's [Strings] section 
-    NULL,                                                   // optional template name
-    CreateMiniportTopologyVirtualAudioDriver,
-    &SpeakerTopoMiniportFilterDescriptor,
-    0, NULL,                                                // Interface properties
-    L"WaveSpeaker",                                         // make sure this or the template name matches with KSNAME_WaveSpeaker in the inf's [Strings] section
-    NULL,                                                   // optional template name
-    CreateMiniportWaveRTVirtualAudioDriver,
-    &SpeakerWaveMiniportFilterDescriptor,
-    0,                                                      // Interface properties
-    NULL,
-    SPEAKER_DEVICE_MAX_CHANNELS,
-    SpeakerPinDeviceFormatsAndModes,
-    SIZEOF_ARRAY(SpeakerPinDeviceFormatsAndModes),
-    SpeakerTopologyPhysicalConnections,
-    SIZEOF_ARRAY(SpeakerTopologyPhysicalConnections),
-    ENDPOINT_NO_FLAGS,
+#define DEFINE_RENDER_CABLE(var, topo, wave, index)                       \
+static ENDPOINT_MINIPAIR var =                                             \
+{                                                                          \
+    eSpeakerDevice,                                                        \
+    topo,                                                                  \
+    NULL,                                                                  \
+    CreateMiniportTopologyVirtualAudioDriver,                              \
+    &SpeakerTopoMiniportFilterDescriptor,                                  \
+    0, NULL,                                                               \
+    wave,                                                                  \
+    NULL,                                                                  \
+    CreateMiniportWaveRTVirtualAudioDriver,                                \
+    &SpeakerWaveMiniportFilterDescriptor,                                  \
+    0,                                                                     \
+    NULL,                                                                  \
+    SPEAKER_DEVICE_MAX_CHANNELS,                                           \
+    SpeakerPinDeviceFormatsAndModes,                                       \
+    SIZEOF_ARRAY(SpeakerPinDeviceFormatsAndModes),                         \
+    SpeakerTopologyPhysicalConnections,                                    \
+    SIZEOF_ARRAY(SpeakerTopologyPhysicalConnections),                      \
+    ENDPOINT_NO_FLAGS,                                                     \
+    index                                                                  \
 };
 
+DEFINE_RENDER_CABLE(RenderCable1, L"TopologyCable1", L"WaveCable1", 0)
+DEFINE_RENDER_CABLE(RenderCable2, L"TopologyCable2", L"WaveCable2", 1)
+DEFINE_RENDER_CABLE(RenderCable3, L"TopologyCable3", L"WaveCable3", 2)
+DEFINE_RENDER_CABLE(RenderCable4, L"TopologyCable4", L"WaveCable4", 3)
 //
 // Capture miniports.
 //
@@ -118,29 +123,34 @@ PHYSICALCONNECTIONTABLE MicArray1TopologyPhysicalConnections[] =
     }
 };
 
-static
-ENDPOINT_MINIPAIR MicArray1Miniports =
-{
-    eMicArrayDevice1,
-    L"TopologyMicArray1",                   // make sure this or the template name matches with KSNAME_TopologyMicArray1 in the inf's [Strings] section 
-    NULL,                                   // optional template name
-    CreateMicArrayMiniportTopology,
-    &MicArray1TopoMiniportFilterDescriptor,
-    0, NULL,                                // Interface properties
-    L"WaveMicArray1",                       // make sure this or the tempalte name matches with KSNAME_WaveMicArray1 in the inf's [Strings] section
-    NULL,                                   // optional template name
-    CreateMiniportWaveRTVirtualAudioDriver,
-    &MicArrayWaveMiniportFilterDescriptor,
-    0,                                      // Interface properties
-    NULL,
-    MICARRAY_DEVICE_MAX_CHANNELS,
-    MicArrayPinDeviceFormatsAndModes,
-    SIZEOF_ARRAY(MicArrayPinDeviceFormatsAndModes),
-    MicArray1TopologyPhysicalConnections,
-    SIZEOF_ARRAY(MicArray1TopologyPhysicalConnections),
-    ENDPOINT_NO_FLAGS,
+#define DEFINE_CAPTURE_CABLE(var, topo, wave, index)                      \
+static ENDPOINT_MINIPAIR var =                                             \
+{                                                                          \
+    eMicArrayDevice1,                                                      \
+    topo,                                                                  \
+    NULL,                                                                  \
+    CreateMicArrayMiniportTopology,                                        \
+    &MicArray1TopoMiniportFilterDescriptor,                                \
+    0, NULL,                                                               \
+    wave,                                                                  \
+    NULL,                                                                  \
+    CreateMiniportWaveRTVirtualAudioDriver,                                \
+    &MicArrayWaveMiniportFilterDescriptor,                                 \
+    0,                                                                     \
+    NULL,                                                                  \
+    MICARRAY_DEVICE_MAX_CHANNELS,                                          \
+    MicArrayPinDeviceFormatsAndModes,                                      \
+    SIZEOF_ARRAY(MicArrayPinDeviceFormatsAndModes),                        \
+    MicArray1TopologyPhysicalConnections,                                  \
+    SIZEOF_ARRAY(MicArray1TopologyPhysicalConnections),                    \
+    ENDPOINT_NO_FLAGS,                                                     \
+    index                                                                  \
 };
 
+DEFINE_CAPTURE_CABLE(CaptureCable1, L"TopologyCableMic1", L"WaveCableMic1", 0)
+DEFINE_CAPTURE_CABLE(CaptureCable2, L"TopologyCableMic2", L"WaveCableMic2", 1)
+DEFINE_CAPTURE_CABLE(CaptureCable3, L"TopologyCableMic3", L"WaveCableMic3", 2)
+DEFINE_CAPTURE_CABLE(CaptureCable4, L"TopologyCableMic4", L"WaveCableMic4", 3)
 
 //=============================================================================
 //
@@ -148,9 +158,12 @@ ENDPOINT_MINIPAIR MicArray1Miniports =
 // unnessary, this array could contain capture endpoints.
 //
 static
-PENDPOINT_MINIPAIR  g_RenderEndpoints[] = 
+PENDPOINT_MINIPAIR  g_RenderEndpoints[] =
 {
-    &SpeakerMiniports,
+    &RenderCable1,
+    &RenderCable2,
+    &RenderCable3,
+    &RenderCable4,
 };
 
 #define g_cRenderEndpoints  (SIZEOF_ARRAY(g_RenderEndpoints))
@@ -163,7 +176,10 @@ PENDPOINT_MINIPAIR  g_RenderEndpoints[] =
 static
 PENDPOINT_MINIPAIR  g_CaptureEndpoints[] =
 {
-    &MicArray1Miniports,
+    &CaptureCable1,
+    &CaptureCable2,
+    &CaptureCable3,
+    &CaptureCable4,
 };
 
 #define g_cCaptureEndpoints (SIZEOF_ARRAY(g_CaptureEndpoints))

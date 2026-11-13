@@ -1424,7 +1424,7 @@ ByteDisplacement - # of bytes to process.
         // Unsupported formats (anything other than 48 kHz stereo PCM) get silence.
         if (loopbackSupported)
         {
-            LoopbackRead(m_pDmaBuffer + bufferOffset, runWrite, loopbackBytesPerSample);
+            LoopbackRead(m_pMiniport->CableIndex(), m_pDmaBuffer + bufferOffset, runWrite, loopbackBytesPerSample);
         }
         else
         {
@@ -1472,7 +1472,7 @@ ByteDisplacement - # of bytes to process.
     while (ByteDisplacement > 0)
     {
         ULONG runRead = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
-        LoopbackWrite(m_pDmaBuffer + bufferOffset, runRead, bytesPerSample);
+        LoopbackWrite(m_pMiniport->CableIndex(), m_pDmaBuffer + bufferOffset, runRead, bytesPerSample);
         bufferOffset = (bufferOffset + runRead) % m_ulDmaBufferSize;
         ByteDisplacement -= runRead;
     }

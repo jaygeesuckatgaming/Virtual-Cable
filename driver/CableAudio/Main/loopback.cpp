@@ -6,7 +6,7 @@ Module Name:
 
 Abstract:
 
-    Speaker-to-microphone loopback. See loopback.h for the design notes.
+    Per-cable speaker-to-microphone loopback. See loopback.h for the design.
 
 --*/
 
@@ -17,13 +17,18 @@ Abstract:
 #pragma code_seg()
 
 //
-// Shared ring buffer. Lives in the driver image's non-paged data section.
-// Zero-initialised storage is a valid initial state for KSPIN_LOCK.
+// One ring per cable pair. Zero-initialised storage is a valid initial state
+// for KSPIN_LOCK.
 //
-static LONG       g_LoopbackRing[LOOPBACK_RING_FRAMES * LOOPBACK_CHANNELS];
-static KSPIN_LOCK g_LoopbackLock;
-static ULONG      g_LoopbackWriteFrame;     // next frame index to write
-static ULONG      g_LoopbackFramesQueued;   // frames available to read
+typedef struct _LOOPBACK_CABLE
+{
+    LONG        Ring[LOOPBACK_RING_FRAMES * LOOPBACK_CHANNELS];
+    KSPIN_LOCK  Lock;
+    ULONG       WriteFrame;     // next frame index to write
+    ULONG       FramesQueued;   // frames available to read
+} LOOPBACK_CABLE;
+
+static LOOPBACK_CABLE g_Loopback[LOOPBACK_CABLES];
 
 //=============================================================================
 // Sample conversion helpers. Stream samples are little-endian, signed and
@@ -140,6 +145,7 @@ LoopbackIsFormatSupported
 VOID
 LoopbackWrite
 (
+    _In_ ULONG                              CableIndex,
     _In_reads_bytes_(ByteCount) const BYTE* Source,
     _In_ ULONG                              ByteCount,
     _In_ ULONG                              BytesPerSample
@@ -147,19 +153,20 @@ LoopbackWrite
 {
     ULONG frameBytes = BytesPerSample * LOOPBACK_CHANNELS;
 
-    if (Source == NULL || frameBytes == 0)
+    if (CableIndex >= LOOPBACK_CABLES || Source == NULL || frameBytes == 0)
     {
         return;
     }
 
+    LOOPBACK_CABLE* cable = &g_Loopback[CableIndex];
     ULONG frames = ByteCount / frameBytes;
     KIRQL oldIrql;
 
-    KeAcquireSpinLock(&g_LoopbackLock, &oldIrql);
+    KeAcquireSpinLock(&cable->Lock, &oldIrql);
 
     for (ULONG i = 0; i < frames; i++)
     {
-        LONG* destination = &g_LoopbackRing[g_LoopbackWriteFrame * LOOPBACK_CHANNELS];
+        LONG* destination = &cable->Ring[cable->WriteFrame * LOOPBACK_CHANNELS];
 
         for (ULONG channel = 0; channel < LOOPBACK_CHANNELS; channel++)
         {
@@ -167,21 +174,22 @@ LoopbackWrite
             Source += BytesPerSample;
         }
 
-        g_LoopbackWriteFrame = (g_LoopbackWriteFrame + 1) % LOOPBACK_RING_FRAMES;
+        cable->WriteFrame = (cable->WriteFrame + 1) % LOOPBACK_RING_FRAMES;
 
-        if (g_LoopbackFramesQueued < LOOPBACK_RING_FRAMES)
+        if (cable->FramesQueued < LOOPBACK_RING_FRAMES)
         {
-            g_LoopbackFramesQueued++;
+            cable->FramesQueued++;
         }
     }
 
-    KeReleaseSpinLock(&g_LoopbackLock, oldIrql);
+    KeReleaseSpinLock(&cable->Lock, oldIrql);
 }
 
 //=============================================================================
 VOID
 LoopbackRead
 (
+    _In_ ULONG                          CableIndex,
     _Out_writes_bytes_(ByteCount) BYTE* Destination,
     _In_ ULONG                          ByteCount,
     _In_ ULONG                          BytesPerSample
@@ -194,23 +202,24 @@ LoopbackRead
         return;
     }
 
-    if (frameBytes == 0)
+    if (CableIndex >= LOOPBACK_CABLES || frameBytes == 0)
     {
         RtlZeroMemory(Destination, ByteCount);
         return;
     }
 
+    LOOPBACK_CABLE* cable = &g_Loopback[CableIndex];
     ULONG frames    = ByteCount / frameBytes;
     ULONG remainder = ByteCount % frameBytes;
     KIRQL oldIrql;
 
-    KeAcquireSpinLock(&g_LoopbackLock, &oldIrql);
+    KeAcquireSpinLock(&cable->Lock, &oldIrql);
 
     //
     // Keep latency bounded: if the microphone has fallen behind (for example
     // it started after the speaker), drop the oldest audio.
     //
-    ULONG queued = g_LoopbackFramesQueued;
+    ULONG queued = cable->FramesQueued;
     ULONG maxQueued = LOOPBACK_MAX_LATENCY_FRAMES + frames;
 
     if (queued > maxQueued)
@@ -218,12 +227,12 @@ LoopbackRead
         queued = maxQueued;
     }
 
-    ULONG readFrame = (g_LoopbackWriteFrame + LOOPBACK_RING_FRAMES - queued) % LOOPBACK_RING_FRAMES;
+    ULONG readFrame = (cable->WriteFrame + LOOPBACK_RING_FRAMES - queued) % LOOPBACK_RING_FRAMES;
     ULONG copyFrames = min(frames, queued);
 
     for (ULONG i = 0; i < copyFrames; i++)
     {
-        const LONG* source = &g_LoopbackRing[readFrame * LOOPBACK_CHANNELS];
+        const LONG* source = &cable->Ring[readFrame * LOOPBACK_CHANNELS];
 
         for (ULONG channel = 0; channel < LOOPBACK_CHANNELS; channel++)
         {
@@ -234,9 +243,9 @@ LoopbackRead
         readFrame = (readFrame + 1) % LOOPBACK_RING_FRAMES;
     }
 
-    g_LoopbackFramesQueued = queued - copyFrames;
+    cable->FramesQueued = queued - copyFrames;
 
-    KeReleaseSpinLock(&g_LoopbackLock, oldIrql);
+    KeReleaseSpinLock(&cable->Lock, oldIrql);
 
     //
     // Underrun (speaker idle or behind): pad with silence.

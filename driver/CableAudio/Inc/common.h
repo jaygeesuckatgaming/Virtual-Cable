@@ -229,6 +229,9 @@ typedef struct _ENDPOINT_MINIPAIR
 
     // General endpoint flags (one of more ENDPOINT_<flag-type>, see above)
     ULONG                           DeviceFlags;
+
+    // Loopback cable this endpoint pair belongs to (0..LOOPBACK_CABLES-1).
+    ULONG                           CableIndex;
 } ENDPOINT_MINIPAIR;
 
 //=============================================================================
