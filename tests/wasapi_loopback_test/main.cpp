@@ -11,10 +11,13 @@
 //   wasapi_loopback_test --list
 //   wasapi_loopback_test --render "Virtual Cable 01" --capture "Virtual Cable 01"
 //                        [--seconds 10] [--freq 1000]
+//   wasapi_loopback_test --render "Virtual Cable 01" --capture "Virtual Cable 02"
+//                        --expect-silence      (isolation: PASS = silence)
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <mmsystem.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <endpointvolume.h>
@@ -44,6 +47,15 @@ const PROPERTYKEY kFriendlyName = {
 struct ComInit {
     ComInit() { CoInitializeEx(nullptr, COINIT_MULTITHREADED); }
     ~ComInit() { CoUninitialize(); }
+};
+
+// The render loop paces itself with Sleep(). The default 15.6 ms timer makes a
+// 10 ms sleep overshoot by half, the stream then underruns, and the silence
+// between clicks stretches the measured interval so the drift figure is
+// meaningless (it reported "0 ppm over 0 intervals" in a VM).
+struct TimerResolution {
+    TimerResolution() { timeBeginPeriod(1); }
+    ~TimerResolution() { timeEndPeriod(1); }
 };
 
 std::string Narrow(const wchar_t* text) {
@@ -200,6 +212,46 @@ double QpcSeconds() {
     return static_cast<double>(now.QuadPart) / static_cast<double>(frequency.QuadPart);
 }
 
+// IAudioClock reports the endpoint's own device position together with the
+// QPC tick at which it was valid. Two samples give the device clock's rate
+// without involving this tool's write loop or click detection at all.
+struct ClockPoint {
+    bool   valid = false;
+    UINT64 position = 0;
+    UINT64 qpc = 0;
+    double frequency = 0.0;
+};
+
+ClockPoint SampleAudioClock(IAudioClock* clock) {
+    ClockPoint point;
+    if (!clock) return point;
+    UINT64 frequency = 0;
+    UINT64 position = 0;
+    UINT64 qpc = 0;
+    if (FAILED(clock->GetFrequency(&frequency)) || frequency == 0) return point;
+    if (FAILED(clock->GetPosition(&position, &qpc)) || qpc == 0) return point;
+    point.valid = true;
+    point.position = position;
+    point.qpc = qpc;
+    point.frequency = static_cast<double>(frequency);
+    return point;
+}
+
+bool ClockRate(const ClockPoint& from, const ClockPoint& to, double sampleRate, double* rate) {
+    if (!from.valid || !to.valid || to.qpc <= from.qpc) return false;
+    LARGE_INTEGER qpcFrequency = {};
+    QueryPerformanceFrequency(&qpcFrequency);
+    if (qpcFrequency.QuadPart == 0 || from.frequency <= 0.0) return false;
+    const double seconds = static_cast<double>(to.qpc - from.qpc) /
+                           static_cast<double>(qpcFrequency.QuadPart);
+    if (seconds <= 0.0) return false;
+    // IAudioClock counts in whatever unit the endpoint reports: samples for a
+    // normal endpoint, bytes for one that exposes its DMA movement rate.
+    const double unitsPerSecond = static_cast<double>(to.position - from.position) / seconds;
+    *rate = unitsPerSecond * sampleRate / from.frequency;
+    return true;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -209,6 +261,7 @@ int wmain(int argc, wchar_t** argv) {
     double frequency = 1000.0;
     bool list = false;
     bool fixVolume = false;
+    bool expectSilence = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = Narrow(argv[i]);
@@ -219,6 +272,8 @@ int wmain(int argc, wchar_t** argv) {
             list = true;
         } else if (arg == "--fix-volume") {
             fixVolume = true;
+        } else if (arg == "--expect-silence") {
+            expectSilence = true;
         } else if (arg == "--render") {
             next(&renderNeedle);
         } else if (arg == "--capture") {
@@ -238,6 +293,13 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     ComInit com;
+    TimerResolution timer;
+
+    // A hypervisor may rescale TSC, which changes QueryPerformanceFrequency.
+    // The driver caches that frequency per stream, so a change between the two
+    // stream starts shows up as false drift; print both ends of the run.
+    LARGE_INTEGER qpcFrequencyStart = {};
+    QueryPerformanceFrequency(&qpcFrequencyStart);
     IMMDeviceEnumerator* enumerator = nullptr;
     if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                 __uuidof(IMMDeviceEnumerator),
@@ -254,7 +316,10 @@ int wmain(int argc, wchar_t** argv) {
 
     if (renderNeedle.empty() || captureNeedle.empty()) {
         wprintf(L"Usage: --render <name> --capture <name> [--seconds N] [--freq HZ]\n");
+        wprintf(L"       [--expect-silence]\n");
         wprintf(L"       --list\n");
+        wprintf(L"  --expect-silence  isolation check: PASS means the capture heard\n");
+        wprintf(L"                    nothing (use two different cables)\n");
         enumerator->Release();
         return 2;
     }
@@ -297,6 +362,11 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
 
+    IAudioClock* renderClock = nullptr;
+    IAudioClock* captureClock = nullptr;
+    render.client->GetService(__uuidof(IAudioClock), reinterpret_cast<void**>(&renderClock));
+    capture.client->GetService(__uuidof(IAudioClock), reinterpret_cast<void**>(&captureClock));
+
     const double renderRate = render.rate;
     const double captureRate = capture.rate;
     const unsigned long long periodFrames =
@@ -310,6 +380,7 @@ int wmain(int argc, wchar_t** argv) {
     std::atomic<int> renderUnderruns{0};
 
     std::vector<ClickEvent> pending;
+    std::vector<double> underrunQpc;
     CRITICAL_SECTION pendingLock;
     InitializeCriticalSection(&pendingLock);
 
@@ -329,13 +400,26 @@ int wmain(int argc, wchar_t** argv) {
         while (!stop.load()) {
             UINT32 padding = 0;
             render.client->GetCurrentPadding(&padding);
-            if (padding >= render.bufferFrames) {
+            // Pace from the endpoint's own padding, not from a Sleep() derived
+            // from the frame count: timer granularity in a VM makes that sleep
+            // overshoot, the stream starves, and every later measurement is
+            // taken through the resulting gaps.
+            if (padding == 0 && framesWritten.load() > 0) {
                 renderUnderruns.fetch_add(1);
+                const double now = QpcSeconds();
+                EnterCriticalSection(&pendingLock);
+                if (underrunQpc.size() < 4096) underrunQpc.push_back(now);
+                LeaveCriticalSection(&pendingLock);
+            }
+            // Keep the endpoint as full as it will go instead of refilling a
+            // whole 10 ms block at a time: a scheduler hiccup in a VM can then
+            // no longer drain the buffer, and a gap here is what corrupts both
+            // the drift and the latency figures.
+            if (padding >= render.bufferFrames) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
-            UINT32 available = render.bufferFrames - padding;
-            UINT32 write = std::min(available, block);
+            const UINT32 write = std::min(render.bufferFrames - padding, block);
             BYTE* buffer = nullptr;
             if (FAILED(renderClient->GetBuffer(write, &buffer))) break;
             for (UINT32 i = 0; i < write; ++i) {
@@ -365,14 +449,13 @@ int wmain(int argc, wchar_t** argv) {
             renderClient->ReleaseBuffer(write, 0);
             frame += write;
             framesWritten.store(frame);
-            if (write == 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            } else {
-                const double seconds = 0.9 * write / renderRate;
-                std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
-            }
         }
     });
+
+    // Let both device clocks advance past their start before sampling them.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const ClockPoint renderClockBegin = SampleAudioClock(renderClock);
+    const ClockPoint captureClockBegin = SampleAudioClock(captureClock);
 
     const double startTime = QpcSeconds();
     unsigned long long capturedSamples = 0;
@@ -380,11 +463,13 @@ int wmain(int argc, wchar_t** argv) {
     unsigned long long lastOnsetSample = 0;
     int clickCount = 0;
     int matchCount = 0;
+    int unpaired = 0;
     double latencySum = 0.0;
     double latencyMin = 1e9;
     double latencyMax = 0.0;
     double driftSum = 0.0;
     int driftCount = 0;
+    int driftSkipped = 0;
     int captureStarves = 0;
     int nonFinite = 0;
     int strayNoise = 0;
@@ -433,7 +518,17 @@ int wmain(int argc, wchar_t** argv) {
                         const double interval = static_cast<double>(
                             onsetSample - lastOnsetSample) / captureRate;
                         const double ppm = (interval / kClickPeriodSeconds - 1.0) * 1e6;
-                        if (std::fabs(ppm) < 100000.0) {
+                        // A render gap inside the interval stretches wall time,
+                        // not the sample count, so the interval is invalid.
+                        bool gapped = false;
+                        EnterCriticalSection(&pendingLock);
+                        for (const double t : underrunQpc) {
+                            if (t > lastOnsetQpc && t < onsetQpc) { gapped = true; break; }
+                        }
+                        LeaveCriticalSection(&pendingLock);
+                        if (gapped) {
+                            driftSkipped++;
+                        } else if (std::fabs(ppm) < 100000.0) {
                             driftSum += ppm;
                             driftCount++;
                         }
@@ -443,7 +538,14 @@ int wmain(int argc, wchar_t** argv) {
                     clickCount++;
 
                     EnterCriticalSection(&pendingLock);
-                    if (!pending.empty()) {
+                    // A backlog means earlier clicks were never detected (a
+                    // capture gap). Popping the oldest event would then pair
+                    // every later click and shift latency by a whole click
+                    // period, so resynchronise instead of reporting that.
+                    if (pending.size() > 2) {
+                        pending.clear();
+                        unpaired++;
+                    } else if (!pending.empty()) {
                         const ClickEvent event = pending.front();
                         pending.erase(pending.begin());
                         const double playQpc = event.writtenQpc +
@@ -489,11 +591,16 @@ int wmain(int argc, wchar_t** argv) {
         captureClient->ReleaseBuffer(frames);
     }
 
+    const double elapsed = QpcSeconds() - startTime;
+    const ClockPoint renderClockEnd = SampleAudioClock(renderClock);
+    const ClockPoint captureClockEnd = SampleAudioClock(captureClock);
     stop.store(true);
     renderThread.join();
 
     render.client->Stop();
     capture.client->Stop();
+    if (renderClock) renderClock->Release();
+    if (captureClock) captureClock->Release();
     renderClient->Release();
     captureClient->Release();
     render.client->Release();
@@ -508,25 +615,78 @@ int wmain(int argc, wchar_t** argv) {
     const double noiseDb = 10.0 * std::log10(std::max(noisePower, 1e-12));
     const double snr = toneDb - noiseDb;
     const double latencyAvg = matchCount > 0 ? latencySum / matchCount : 0.0;
-    const double driftPpm = driftCount > 0 ? driftSum / driftCount : 0.0;
+    const double intervalPpm = driftCount > 0 ? driftSum / driftCount : 0.0;
+
+    // The click-spacing figure is only as good as this tool's own sample
+    // accounting; the endpoint clocks are the driver's own report and are what
+    // decide whether the two sides of the cable run at the same rate.
+    double renderClockRate = 0.0;
+    double captureClockRate = 0.0;
+    const bool renderClockOk =
+        ClockRate(renderClockBegin, renderClockEnd, renderRate, &renderClockRate);
+    const bool captureClockOk =
+        ClockRate(captureClockBegin, captureClockEnd, captureRate, &captureClockRate);
+    const bool clockOk = renderClockOk && captureClockOk && renderClockRate > 0.0;
+    const double clockPpm = clockOk ? (captureClockRate / renderClockRate - 1.0) * 1e6 : 0.0;
 
     wprintf(L"render  : %.0f Hz, buffer %u frames\n", renderRate, render.bufferFrames);
     wprintf(L"capture : %.0f Hz, buffer %u frames\n", captureRate, capture.bufferFrames);
     wprintf(L"written : %llu frames\n", framesWritten.load());
+    wprintf(L"time    : %.3f s, render %.1f frames/s, capture %.1f frames/s\n",
+            elapsed,
+            elapsed > 0.0 ? framesWritten.load() / elapsed : 0.0,
+            elapsed > 0.0 ? capturedSamples / elapsed : 0.0);
+    {
+        LARGE_INTEGER qpcFrequencyEnd = {};
+        QueryPerformanceFrequency(&qpcFrequencyEnd);
+        wprintf(L"qpc     : freq %lld Hz at start, %lld Hz at end%s\n",
+                static_cast<long long>(qpcFrequencyStart.QuadPart),
+                static_cast<long long>(qpcFrequencyEnd.QuadPart),
+                qpcFrequencyEnd.QuadPart != qpcFrequencyStart.QuadPart ? L"  (changed)" : L"");
+    }
+    if (clockOk) {
+        wprintf(L"clock   : device render %.1f frames/s, capture %.1f frames/s (IAudioClock)\n",
+                renderClockRate, captureClockRate);
+    } else {
+        wprintf(L"clock   : device render %s, capture %s (IAudioClock)\n",
+                renderClockOk ? L"ok" : L"n/a", captureClockOk ? L"ok" : L"n/a");
+    }
     wprintf(L"clicks  : %d captured, %d matched\n", clickCount, matchCount);
     wprintf(L"level   : %.1f dBFS (tone), SNR %.1f dB\n", toneDb, snr);
     if (matchCount > 0) {
-        wprintf(L"latency : avg %.2f ms, min %.2f, max %.2f (QPC approx)\n",
-                latencyAvg * 1000.0, latencyMin * 1000.0, latencyMax * 1000.0);
+        wprintf(L"latency : avg %.2f ms, min %.2f, max %.2f (QPC approx), %d resynced\n",
+                latencyAvg * 1000.0, latencyMin * 1000.0, latencyMax * 1000.0, unpaired);
     } else {
         wprintf(L"latency : n/a (no matched clicks)\n");
     }
-    wprintf(L"drift   : %.1f ppm over %d intervals\n", driftPpm, driftCount);
-    wprintf(L"glitch  : render buffer-full %d, capture starves %d, non-finite %d, stray %d\n",
+    if (clockOk) {
+        wprintf(L"drift   : %.1f ppm (device clocks)\n", clockPpm);
+    } else {
+        wprintf(L"drift   : n/a (device clock unavailable)\n");
+    }
+    if (driftCount > 0) {
+        wprintf(L"interval: %.1f ppm click spacing over %d intervals (%d skipped for render gaps)\n",
+                intervalPpm, driftCount, driftSkipped);
+    } else {
+        wprintf(L"interval: n/a (no two consecutive clicks)\n");
+    }
+    wprintf(L"glitch  : render underruns %d, capture starves %d, non-finite %d, stray %d\n",
             renderUnderruns.load(), captureStarves, nonFinite, strayNoise);
 
-    const bool pass = clickCount >= 2 && matchCount >= 2 && toneDb > -60.0 &&
-                      nonFinite == 0 && std::fabs(driftPpm) < 200.0;
+    bool pass;
+    if (expectSilence) {
+        // Isolation check: the tone was rendered into a different cable, so a
+        // pass is the capture staying silent. Reporting the ordinary "did we
+        // hear it" verdict here is what looked like a failure on cable 01/02.
+        const bool heard = clickCount > 0 || toneDb > -80.0;
+        pass = !heard && nonFinite == 0;
+        wprintf(L"mode    : isolation (the capture must stay silent)\n");
+        wprintf(L"verdict : %s\n",
+                heard ? L"audio leaked into this cable" : L"silent, cables isolated");
+    } else {
+        pass = clickCount >= 2 && matchCount >= 2 && toneDb > -60.0 &&
+               nonFinite == 0 && clockOk && std::fabs(clockPpm) < 200.0;
+    }
     wprintf(L"PASS %s\n", pass ? L"true" : L"false");
     return pass ? 0 : 1;
 }
